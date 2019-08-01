@@ -35,7 +35,7 @@ func (l *SpotListener) Type() string {
 }
 
 // Start the spot termination notice listener.
-func (l *SpotListener) Start(ctx context.Context, notices chan<- TerminationNotice, log *logrus.Entry) error {
+func (l *SpotListener) Start(ctx context.Context, notices chan<- Notice, log *logrus.Entry) error {
 	if !l.metadata.Available() {
 		return errors.New("ec2 metadata is not available")
 	}
@@ -89,6 +89,10 @@ type spotTerminationNotice struct {
 
 func (n *spotTerminationNotice) Type() string {
 	return n.noticeType
+}
+
+func (n *spotTerminationNotice) Transition() Transition {
+	return TerminationTransition
 }
 
 func (n *spotTerminationNotice) Handle(ctx context.Context, handler Handler, log *logrus.Entry) error {

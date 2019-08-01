@@ -73,11 +73,11 @@ type Daemon struct {
 }
 
 // Start the Daemon.
-func (d *Daemon) Start(ctx context.Context) (notice TerminationNotice, err error) {
+func (d *Daemon) Start(ctx context.Context) (notice Notice, err error) {
 	log := d.logger.WithField("instanceId", d.instanceID)
 
 	// Use a buffered channel to avoid deadlocking a goroutine when we stop listening
-	notices := make(chan TerminationNotice, len(d.listeners))
+	notices := make(chan Notice, len(d.listeners))
 	defer close(notices)
 
 	// Always wait for all listeners to exit before returning from this function
@@ -134,12 +134,20 @@ func (d *Daemon) AddListener(l Listener) {
 // Listener ...
 type Listener interface {
 	Type() string
-	Start(context.Context, chan<- TerminationNotice, *logrus.Entry) error
+	Start(context.Context, chan<- Notice, *logrus.Entry) error
 }
 
-// TerminationNotice ...
-type TerminationNotice interface {
+type Transition int
+
+const (
+	LaunchTransition Transition = iota
+	TerminationTransition
+)
+
+// Notice ...
+type Notice interface {
 	Type() string
+	Transition() Transition
 	Handle(context.Context, Handler, *logrus.Entry) error
 }
 

@@ -57,7 +57,7 @@ func (l *AutoscalingListener) Type() string {
 }
 
 // Start the autoscaling lifecycle hook listener.
-func (l *AutoscalingListener) Start(ctx context.Context, notices chan<- TerminationNotice, log *logrus.Entry) error {
+func (l *AutoscalingListener) Start(ctx context.Context, notices chan<- Notice, log *logrus.Entry) error {
 	log.WithField("queue", l.queue.name).Debug("Creating sqs queue")
 	if err := l.queue.Create(); err != nil {
 		return err
@@ -120,33 +120,45 @@ func (l *AutoscalingListener) Start(ctx context.Context, notices chan<- Terminat
 					continue
 				}
 
-				if msg.Transition != "autoscaling:EC2_INSTANCE_TERMINATING" {
+				switch msg.Transition {
+				case "autoscaling:EC2_INSTANCE_LAUNCHING":
+					notices <- &autoscalingLaunchNotice{
+						&autoscalingNotice{
+							noticeType:  l.Type(),
+							message:     &msg,
+							autoscaling: l.autoscaling,
+						},
+					}
+				case "autoscaling:EC2_INSTANCE_TERMINATING":
+					notices <- &autoscalingTerminationNotice{
+						&autoscalingNotice{
+							noticeType:  l.Type(),
+							message:     &msg,
+							autoscaling: l.autoscaling,
+						},
+					}
+				default:
 					log.WithField("transition", msg.Transition).Debug("Skipping autoscaling event, not a termination notice")
 					continue
 				}
 
-				notices <- &autoscalingTerminationNotice{
-					noticeType:  l.Type(),
-					message:     &msg,
-					autoscaling: l.autoscaling,
-				}
 				return nil
 			}
 		}
 	}
 }
 
-type autoscalingTerminationNotice struct {
+type autoscalingNotice struct {
 	noticeType  string
 	message     *Message
 	autoscaling AutoscalingClient
 }
 
-func (n *autoscalingTerminationNotice) Type() string {
+func (n *autoscalingNotice) Type() string {
 	return n.noticeType
 }
 
-func (n *autoscalingTerminationNotice) Handle(ctx context.Context, handler Handler, log *logrus.Entry) error {
+func (n *autoscalingNotice) Handle(ctx context.Context, handler Handler, log *logrus.Entry) error {
 	defer func() {
 		_, err := n.autoscaling.CompleteLifecycleAction(&autoscaling.CompleteLifecycleActionInput{
 			AutoScalingGroupName:  aws.String(n.message.GroupName),
@@ -183,4 +195,20 @@ func (n *autoscalingTerminationNotice) Handle(ctx context.Context, handler Handl
 	}()
 
 	return handler.Execute(ctx, n.message.Transition, n.message.InstanceID)
+}
+
+type autoscalingLaunchNotice struct {
+	*autoscalingNotice
+}
+
+func (n *autoscalingLaunchNotice) Transition() Transition {
+	return LaunchTransition
+}
+
+type autoscalingTerminationNotice struct {
+	*autoscalingNotice
+}
+
+func (n *autoscalingTerminationNotice) Transition() Transition {
+	return TerminationTransition
 }

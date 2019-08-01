@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,7 +34,8 @@ func main() {
 		instanceID          string
 		snsTopic            string
 		disableSpotListener bool
-		handler             *os.File
+		launchHandler       *os.File
+		terminationHandler  *os.File
 		jsonLogging         bool
 		debugLogging        bool
 		cloudwatchGroup     string
@@ -49,9 +51,14 @@ func main() {
 	app.Flag("no-spot", "Disable the spot termination listener").
 		BoolVar(&disableSpotListener)
 
-	app.Flag("handler", "The script to invoke to handle events").
-		Required().
-		FileVar(&handler)
+	app.Flag("handler", "The script to invoke to handle termination events").
+		FileVar(&terminationHandler)
+
+	app.Flag("launch-handler", "The script to invoke to handle launch events").
+		FileVar(&launchHandler)
+
+	app.Flag("termination-handler", "The script to invoke to handle termination events").
+		FileVar(&terminationHandler)
 
 	app.Flag("json", "Enable JSON logging").
 		BoolVar(&jsonLogging)
@@ -75,6 +82,10 @@ func main() {
 
 		if debugLogging {
 			logger.SetLevel(logrus.DebugLevel)
+		}
+
+		if launchHandler == nil && terminationHandler == nil {
+			return errors.New("one of required flags --handler, --launch-handler, or --termination-handler not provided")
 		}
 
 		sess, err := session.NewSession()
@@ -132,7 +143,6 @@ func main() {
 			}
 		}()
 
-		handler := lifecycled.NewFileHandler(handler)
 		daemon := lifecycled.New(&lifecycled.Config{
 			InstanceID:           instanceID,
 			SNSTopic:             snsTopic,
@@ -147,6 +157,13 @@ func main() {
 		if notice != nil {
 			log := logger.WithFields(logrus.Fields{"instanceId": instanceID, "notice": notice.Type()})
 			log.Info("Executing handler")
+
+			var handler *lifecycled.FileHandler
+			if notice.Transition() == lifecycled.LaunchTransition {
+				handler = lifecycled.NewFileHandler(launchHandler)
+			} else {
+				handler = lifecycled.NewFileHandler(terminationHandler)
+			}
 
 			start, err := time.Now(), notice.Handle(ctx, handler, log)
 			log = log.WithField("duration", time.Since(start).String())
