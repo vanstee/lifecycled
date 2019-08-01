@@ -80,10 +80,22 @@ func (l *AutoscalingListener) Start(ctx context.Context, notices chan<- Notice, 
 		}
 	}()
 
+	var pending []Notice
 	for {
+		// Only send pending notices if available. The following select wont try to
+		// send to a nil channel.
+		var pendingNotices chan<- Notice
+		var notice Notice
+		if len(pending) > 0 {
+			pendingNotices = notices
+			notice = pending[0]
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil
+		case pendingNotices <- notice:
+			pending = pending[1:]
 		default:
 			log.WithField("queueURL", l.queue.url).Debug("Polling sqs for messages")
 			messages, err := l.queue.GetMessages(ctx)
@@ -122,27 +134,27 @@ func (l *AutoscalingListener) Start(ctx context.Context, notices chan<- Notice, 
 
 				switch msg.Transition {
 				case "autoscaling:EC2_INSTANCE_LAUNCHING":
-					notices <- &autoscalingLaunchNotice{
+					notice := &autoscalingLaunchNotice{
 						&autoscalingNotice{
 							noticeType:  l.Type(),
 							message:     &msg,
 							autoscaling: l.autoscaling,
 						},
 					}
+					pending = append(pending, notice)
 				case "autoscaling:EC2_INSTANCE_TERMINATING":
-					notices <- &autoscalingTerminationNotice{
+					notice := &autoscalingTerminationNotice{
 						&autoscalingNotice{
 							noticeType:  l.Type(),
 							message:     &msg,
 							autoscaling: l.autoscaling,
 						},
 					}
+					pending = append(pending, notice)
 				default:
 					log.WithField("transition", msg.Transition).Debug("Skipping autoscaling event, not a termination notice")
 					continue
 				}
-
-				return nil
 			}
 		}
 	}

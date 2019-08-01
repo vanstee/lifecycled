@@ -153,7 +153,7 @@ func TestDaemon(t *testing.T) {
 
 			// Create and start the daemon
 			logger, hook := logrus.NewNullLogger()
-			ctx, cancel := context.WithTimeout(context.TODO(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.TODO(), 1*time.Second)
 			defer cancel()
 
 			config := &lifecycled.Config{
@@ -164,7 +164,15 @@ func TestDaemon(t *testing.T) {
 			}
 
 			daemon := lifecycled.NewDaemon(config, sq, sn, as, metadata, logger)
-			notice, err := daemon.Start(ctx)
+			notices := daemon.Start(ctx)
+
+			var notice lifecycled.Notice
+			select {
+			case notice = <-notices:
+			case <-ctx.Done():
+			}
+
+			err := daemon.Stop()
 
 			if err != nil {
 				if !tc.expectDaemonError {
@@ -198,5 +206,4 @@ func TestDaemon(t *testing.T) {
 			}
 		})
 	}
-
 }

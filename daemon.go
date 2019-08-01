@@ -2,11 +2,9 @@ package lifecycled
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
@@ -15,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
 
 // New creates a new lifecycle Daemon.
@@ -70,60 +69,48 @@ type Daemon struct {
 	instanceID string
 	listeners  []Listener
 	logger     *logrus.Logger
+	notices    chan Notice
+	group      *errgroup.Group
+	cancel     context.CancelFunc
 }
 
 // Start the Daemon.
-func (d *Daemon) Start(ctx context.Context) (notice Notice, err error) {
+func (d *Daemon) Start(ctx context.Context) chan Notice {
 	log := d.logger.WithField("instanceId", d.instanceID)
 
 	// Use a buffered channel to avoid deadlocking a goroutine when we stop listening
-	notices := make(chan Notice, len(d.listeners))
-	defer close(notices)
+	d.notices = make(chan Notice, len(d.listeners))
 
-	// Always wait for all listeners to exit before returning from this function
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	// Add a child context to stop all listeners when one has returned
-	listenerCtx, stopListening := context.WithCancel(ctx)
-	defer stopListening()
+	// Allow all listeners to be canceled
+	ctx, d.cancel = context.WithCancel(ctx)
+	d.group, ctx = errgroup.WithContext(ctx)
 
 	for _, listener := range d.listeners {
-		wg.Add(1)
+		listener := listener
+		d.group.Go(func() error {
+			l := log.WithField("listener", listener.Type())
+			l.Info("Starting listener")
 
-		l := log.WithField("listener", listener.Type())
-
-		go func() {
-			defer wg.Done()
-
-			if err := listener.Start(listenerCtx, notices, l); err != nil {
-				l.WithError(err).Error("Failed to start listener")
-				stopListening()
-			} else {
-				l.Info("Stopped listener")
+			if err := listener.Start(ctx, d.notices, l); err != nil {
+				l.WithError(err).Error("Failed while listening")
+				return err
 			}
-		}()
-		l.Info("Starting listener")
+
+			l.Info("Stopped listener")
+			return nil
+		})
 	}
 
 	log.Info("Waiting for termination notices")
+	return d.notices
+}
 
-Listener:
-	for {
-		select {
-		case <-listenerCtx.Done():
-			// Make sure the underlying context was not cancelled
-			if ctx.Err() != context.Canceled {
-				err = errors.New("an error occured")
-			}
-			break Listener
-		case n := <-notices:
-			log.WithField("notice", n.Type()).Info("Received termination notice")
-			notice = n
-			break Listener
-		}
-	}
-	return notice, err
+// Stop the Daemon. Cancel and wait for all listeners to return.
+func (d *Daemon) Stop() error {
+	d.cancel()
+	err := d.group.Wait()
+	close(d.notices)
+	return err
 }
 
 // AddListener to the Daemon.

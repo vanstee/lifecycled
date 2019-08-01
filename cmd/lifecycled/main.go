@@ -150,11 +150,8 @@ func main() {
 			SpotListenerInterval: 5 * time.Second,
 		}, sess, logger)
 
-		notice, err := daemon.Start(ctx)
-		if err != nil {
-			return err
-		}
-		if notice != nil {
+		notices := daemon.Start(ctx)
+		for notice := range notices {
 			log := logger.WithFields(logrus.Fields{"instanceId": instanceID, "notice": notice.Type()})
 			log.Info("Executing handler")
 
@@ -171,9 +168,8 @@ func main() {
 				log.WithError(err).Error("Failed to execute handler")
 			}
 			log.Info("Handler finished succesfully")
-
 		}
-		return nil
+		return daemon.Stop()
 	})
 
 	kingpin.MustParse(app.Parse(os.Args[1:]))

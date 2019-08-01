@@ -43,10 +43,22 @@ func (l *SpotListener) Start(ctx context.Context, notices chan<- Notice, log *lo
 	ticker := time.NewTicker(l.interval)
 	defer ticker.Stop()
 
+	var pending []Notice
 	for {
+		// Only send pending notices if available. The following select wont try to
+		// send to a nil channel.
+		var pendingNotices chan<- Notice
+		var notice Notice
+		if len(pending) > 0 {
+			pendingNotices = notices
+			notice = pending[0]
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil
+		case pendingNotices <- notice:
+			pending = pending[1:]
 		case <-ticker.C:
 			log.Debug("Polling ec2 metadata for spot termination notices")
 
@@ -69,13 +81,13 @@ func (l *SpotListener) Start(ctx context.Context, notices chan<- Notice, log *lo
 				log.WithError(err).Error("Failed to parse termination time")
 				continue
 			}
-			notices <- &spotTerminationNotice{
+			notice := &spotTerminationNotice{
 				noticeType:      l.Type(),
 				instanceID:      l.instanceID,
 				transition:      "ec2:SPOT_INSTANCE_TERMINATION",
 				terminationTime: t,
 			}
-			return nil
+			pending = append(pending, notice)
 		}
 	}
 }
