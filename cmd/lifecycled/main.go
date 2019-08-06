@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,6 +24,8 @@ var (
 )
 
 func main() {
+	log.Printf("hai")
+
 	app := kingpin.New("lifecycled",
 		"Handle AWS autoscaling lifecycle events gracefully")
 
@@ -32,7 +35,7 @@ func main() {
 
 	var (
 		instanceID          string
-		snsTopic            string
+		sqsQueue            string
 		disableSpotListener bool
 		launchHandler       *os.File
 		terminationHandler  *os.File
@@ -45,8 +48,8 @@ func main() {
 	app.Flag("instance-id", "The instance id to listen for events for").
 		StringVar(&instanceID)
 
-	app.Flag("sns-topic", "The SNS topic that receives events").
-		StringVar(&snsTopic)
+	app.Flag("sqs-queue", "The SQS queue that receives events").
+		StringVar(&sqsQueue)
 
 	app.Flag("no-spot", "Disable the spot termination listener").
 		BoolVar(&disableSpotListener)
@@ -143,16 +146,25 @@ func main() {
 			}
 		}()
 
-		daemon := lifecycled.New(&lifecycled.Config{
+		daemon, err := lifecycled.New(&lifecycled.Config{
 			InstanceID:           instanceID,
-			SNSTopic:             snsTopic,
+			SQSQueue:             sqsQueue,
 			SpotListener:         !disableSpotListener,
 			SpotListenerInterval: 5 * time.Second,
 		}, sess, logger)
+		if err != nil {
+			logger.WithError(err).Fatal("Failed to create daemon")
+		}
 
 		notices := daemon.Start(ctx)
 		for notice := range notices {
-			log := logger.WithFields(logrus.Fields{"instanceId": instanceID, "notice": notice.Type()})
+			log := logger.WithFields(
+				logrus.Fields{
+					"instanceId": instanceID,
+					"notice":     notice.Type(),
+					"transition": notice.Transition(),
+				},
+			)
 			log.Info("Executing handler")
 
 			var handler *lifecycled.FileHandler

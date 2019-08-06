@@ -2,8 +2,6 @@ package lifecycled_test
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/buildkite/lifecycled"
 	"github.com/buildkite/lifecycled/mocks"
@@ -54,19 +51,8 @@ func newSQSMessage(instanceID string) *sqs.Message {
 }
 	`, instanceID)
 
-	e, err := json.Marshal(&lifecycled.Envelope{
-		Type:    "type",
-		Subject: "subject",
-		Time:    time.Now(),
-		Message: m,
-	})
-
-	if err != nil {
-		panic(err)
-	}
-
 	return &sqs.Message{
-		Body:          aws.String(string(e)),
+		Body:          aws.String(m),
 		ReceiptHandle: aws.String("handle"),
 	}
 }
@@ -79,7 +65,7 @@ func TestDaemon(t *testing.T) {
 
 	tests := []struct {
 		description        string
-		snsTopic           string
+		sqsQueue           string
 		spotListener       bool
 		subscribeError     error
 		expectedNoticeType string
@@ -87,19 +73,13 @@ func TestDaemon(t *testing.T) {
 	}{
 		{
 			description:        "works with autoscaling listener",
-			snsTopic:           "topic",
+			sqsQueue:           "arn:aws:sqs:us-east-1:000000000000:queue",
 			expectedNoticeType: "autoscaling",
 		},
 		{
 			description:        "works with spot termination listener",
 			spotListener:       true,
 			expectedNoticeType: "spot",
-		},
-		{
-			description:       "cleans up queue if sns topic does not exist",
-			snsTopic:          "invalid",
-			subscribeError:    errors.New("invalid topic"),
-			expectDaemonError: true,
 		},
 	}
 
@@ -110,36 +90,17 @@ func TestDaemon(t *testing.T) {
 			defer ctrl.Finish()
 
 			sq := mocks.NewMockSQSClient(ctrl)
-			sn := mocks.NewMockSNSClient(ctrl)
 			as := mocks.NewMockAutoscalingClient(ctrl)
 
 			// Expected SQS calls
-			if tc.snsTopic != "" {
-				sq.EXPECT().CreateQueue(gomock.Any()).Times(1).Return(&sqs.CreateQueueOutput{
-					QueueUrl: aws.String("url"),
+			if tc.sqsQueue != "" {
+				sq.EXPECT().GetQueueUrl(gomock.Any()).Times(1).Return(&sqs.GetQueueUrlOutput{
+					QueueUrl: aws.String("https://queue.amazonaws.com/000000000000/queue"),
 				}, nil)
-				sq.EXPECT().GetQueueAttributes(gomock.Any()).Times(1).Return(&sqs.GetQueueAttributesOutput{
-					Attributes: map[string]*string{"QueueArn": aws.String("arn")},
+				sq.EXPECT().ReceiveMessageWithContext(gomock.Any(), gomock.Any()).MinTimes(1).Return(&sqs.ReceiveMessageOutput{
+					Messages: []*sqs.Message{newSQSMessage(instanceID)},
 				}, nil)
-				sq.EXPECT().DeleteQueue(gomock.Any()).Times(1).Return(nil, nil)
-
-				if tc.subscribeError == nil {
-					sq.EXPECT().ReceiveMessageWithContext(gomock.Any(), gomock.Any()).MinTimes(1).Return(&sqs.ReceiveMessageOutput{
-						Messages: []*sqs.Message{newSQSMessage(instanceID)},
-					}, nil)
-					sq.EXPECT().DeleteMessageWithContext(gomock.Any(), gomock.Any()).MinTimes(1).Return(nil, nil)
-				}
-			}
-
-			// Expected SNS calls
-			if tc.snsTopic != "" {
-				sn.EXPECT().Subscribe(gomock.Any()).Times(1).Return(&sns.SubscribeOutput{
-					SubscriptionArn: aws.String("arn"),
-				}, tc.subscribeError)
-
-				if tc.subscribeError == nil {
-					sn.EXPECT().Unsubscribe(gomock.Any()).Times(1).Return(nil, nil)
-				}
+				sq.EXPECT().DeleteMessageWithContext(gomock.Any(), gomock.Any()).MinTimes(1).Return(nil, nil)
 			}
 
 			// Stub the metadata endpoint
@@ -158,12 +119,16 @@ func TestDaemon(t *testing.T) {
 
 			config := &lifecycled.Config{
 				InstanceID:           instanceID,
-				SNSTopic:             tc.snsTopic,
+				SQSQueue:             tc.sqsQueue,
 				SpotListener:         tc.spotListener,
 				SpotListenerInterval: 1 * time.Millisecond,
 			}
 
-			daemon := lifecycled.NewDaemon(config, sq, sn, as, metadata, logger)
+			daemon, err := lifecycled.NewDaemon(config, sq, as, metadata, logger)
+			if err != nil {
+				t.Fatalf("unexpected error creating daemon: %v", err)
+			}
+
 			notices := daemon.Start(ctx)
 
 			var notice lifecycled.Notice
@@ -172,7 +137,7 @@ func TestDaemon(t *testing.T) {
 			case <-ctx.Done():
 			}
 
-			err := daemon.Stop()
+			err = daemon.Stop()
 
 			if err != nil {
 				if !tc.expectDaemonError {

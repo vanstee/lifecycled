@@ -2,7 +2,7 @@ package lifecycled
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"time"
@@ -10,18 +10,16 @@ import (
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
 // New creates a new lifecycle Daemon.
-func New(config *Config, sess *session.Session, logger *logrus.Logger) *Daemon {
+func New(config *Config, sess *session.Session, logger *logrus.Logger) (*Daemon, error) {
 	return NewDaemon(
 		config,
 		sqs.New(sess),
-		sns.New(sess),
 		autoscaling.New(sess),
 		ec2metadata.New(sess),
 		logger,
@@ -32,11 +30,10 @@ func New(config *Config, sess *session.Session, logger *logrus.Logger) *Daemon {
 func NewDaemon(
 	config *Config,
 	sqsClient SQSClient,
-	snsClient SNSClient,
 	asgClient AutoscalingClient,
 	metadata *ec2metadata.EC2Metadata,
 	logger *logrus.Logger,
-) *Daemon {
+) (*Daemon, error) {
 	daemon := &Daemon{
 		instanceID: config.InstanceID,
 		logger:     logger,
@@ -44,22 +41,21 @@ func NewDaemon(
 	if config.SpotListener {
 		daemon.AddListener(NewSpotListener(config.InstanceID, metadata, config.SpotListenerInterval))
 	}
-	if config.SNSTopic != "" {
-		queue := NewQueue(
-			fmt.Sprintf("lifecycled-%s", config.InstanceID),
-			config.SNSTopic,
-			sqsClient,
-			snsClient,
-		)
+	if config.SQSQueue != "" {
+		// TODO: Lookup queue name
+		queue, err := NewQueue(config.SQSQueue, sqsClient)
+		if err != nil {
+			return nil, err
+		}
 		daemon.AddListener(NewAutoscalingListener(config.InstanceID, queue, asgClient))
 	}
-	return daemon
+	return daemon, nil
 }
 
 // Config for the Lifecycled Daemon.
 type Config struct {
 	InstanceID           string
-	SNSTopic             string
+	SQSQueue             string
 	SpotListener         bool
 	SpotListenerInterval time.Duration
 }
@@ -101,7 +97,7 @@ func (d *Daemon) Start(ctx context.Context) chan Notice {
 		})
 	}
 
-	log.Info("Waiting for termination notices")
+	log.Info("Waiting for lifecycle notices")
 	return d.notices
 }
 
@@ -124,11 +120,11 @@ type Listener interface {
 	Start(context.Context, chan<- Notice, *logrus.Entry) error
 }
 
-type Transition int
+type Transition string
 
 const (
-	LaunchTransition Transition = iota
-	TerminationTransition
+	LaunchTransition      Transition = "launch"
+	TerminationTransition Transition = "termination"
 )
 
 // Notice ...
@@ -155,9 +151,13 @@ type FileHandler struct {
 
 // Execute the file handler.
 func (h *FileHandler) Execute(ctx context.Context, args ...string) error {
+	log.Printf("Running handler %s", h.file.Name())
 	cmd := exec.CommandContext(ctx, h.file.Name(), args...)
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	err := cmd.Run()
+	log.Printf("Finished handler %s", h.file.Name())
+	return err
 }
